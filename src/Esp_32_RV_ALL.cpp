@@ -36,8 +36,8 @@ BluetoothSerial SerialBT;
 #define rigth_E 13
 #define rigth_Dir_1 14
 #define rigth_Dir_2 12
-#define left_A 23
-#define left_B 22
+#define left_A 4
+#define left_B 5
 #define left_E 25
 #define left_Dir_1 26
 #define left_Dir_2 27
@@ -98,14 +98,48 @@ float Post_Y;
 
 String values;
 
+// Encoder
+const bool mov_forward[5][2] = {
+    {0, 0},
+    {1, 0},
+    {1, 1},
+    {0, 1},
+    {0, 0},
+};
+
+const bool mov_back[5][2] = {
+    {0, 0},
+    {0, 1},
+    {1, 1},
+    {1, 0},
+    {0, 0},
+};
+
+int now_microSegL;
+int now_microSegR;
+
+int enc_antLA;
+int enc_antLB;
+int enc_antRA;
+int enc_antRB;
+
+int enc_LA;
+int enc_LB;
+int enc_RA;
+int enc_RB;
+
+float Wp_encR;
+float Wp_encL;
+
 long prevTime;
 float dt;
 
 // Time between action (milliseconds)
-int laserPeriod = 30;
-int servoPeriod = 5;
-int lecturePeriod = 10;
-int actionPeriod = 5;
+int laserPeriod = 200;
+int servoPeriod = 200;
+int movilControlPeriod = 150;
+int motorControlPeriod = 15;
+int actionPeriod = 50;
 
 /* Function declaration */
 void codeForTask1(void *parameter);
@@ -116,6 +150,8 @@ void f_right();
 void f_left();
 void f_stop();
 void clear();
+void encoder();
+float processEnc(bool enc_antA, bool encA, bool enc_antB, bool encB, int now_microSeg);
 
 void setup()
 {
@@ -133,7 +169,7 @@ void setup()
       ;
   }
 
-  Serial.begin(115200);
+  Serial.begin(1500000);
   clear();
 
   xTaskCreatePinnedToCore(
@@ -171,6 +207,11 @@ void setup()
   // attach the channel to the GPIO to be controlled
   ledcAttachPin(left_E, channelI);
   ledcAttachPin(rigth_E, channelD);
+
+  enc_antLA = digitalRead(left_A);
+  enc_antLB = digitalRead(left_B);
+  enc_antRA = digitalRead(rigth_A);
+  enc_antRB = digitalRead(rigth_B);
 }
 
 void loop()
@@ -193,13 +234,13 @@ void loop()
       distance = 1280;
     }
   }
-  now = millis();
+
   if (now - lastServo > servoPeriod)
   {
     lastServo = now;
     if (turnChange)
     {
-      posDegrees = posDegrees + 10;
+      posDegrees = posDegrees + 45;
       if (posDegrees >= 180)
       {
         turnChange = false;
@@ -207,7 +248,7 @@ void loop()
     }
     else
     {
-      posDegrees = posDegrees - 10;
+      posDegrees = posDegrees - 45;
       if (posDegrees <= 1)
       {
         turnChange = true;
@@ -215,8 +256,8 @@ void loop()
     }
     servo1.write(posDegrees);
   }
-
-  if (now - lastLecture >= lecturePeriod)
+  now = millis();
+  if (now - lastLecture >= movilControlPeriod)
   {
     lastLecture = now;
 
@@ -331,6 +372,7 @@ void loop()
     incoming = "";
     in = false;
   }
+  encoder();
 }
 
 //*****************************
@@ -411,4 +453,66 @@ void clear()
   Serial.print("[2J");
   Serial.write(27);
   Serial.print("[H");
+}
+
+void encoder()
+{
+  enc_LA = digitalRead(left_A);
+  enc_LB = digitalRead(left_B);
+  enc_RA = digitalRead(rigth_A);
+  enc_RB = digitalRead(rigth_B);
+
+  if (enc_antLA != enc_LA || enc_antLB != enc_LB)
+  {
+    Wp_encL = processEnc(enc_antLA, enc_LA, enc_antLB, enc_LB, now_microSegL);
+    Serial.print("L: ");
+    Serial.println(Wp_encL);
+    now_microSegL = micros();
+    enc_antLA = enc_LA;
+    enc_antLB = enc_LB;
+  }
+  else if (Wp_encL != 0)
+  {
+    if (micros() - now_microSegL > 100000)
+    {
+      Wp_encL = 0;
+      Serial.println("R: 0");
+    }
+  }
+
+  if (enc_antRA != enc_RA || enc_antRB != enc_RB)
+  {
+    Wp_encR = processEnc(enc_antRA, enc_RA, enc_antRB, enc_RB, now_microSegR);
+    Serial.print("R: ");
+    Serial.println(Wp_encR);
+    now_microSegR = micros();
+    enc_antRA = enc_RA;
+    enc_antRB = enc_RB;
+  }
+  else if (Wp_encR != 0)
+  {
+    if (micros() - now_microSegR > 100000)
+    {
+      Wp_encR = 0;
+      Serial.println("R: 0");
+    }
+  }
+}
+
+float processEnc(bool enc_antA, bool encA, bool enc_antB, bool encB, int now_microSeg)
+{
+  int dT = micros() - now_microSeg;
+  for (size_t i = 1; i < 5; i++)
+  {
+    if (enc_antA == mov_back[i - 1][0] && encA == mov_back[i][0] && enc_antB == mov_back[i - 1][1] && encB == mov_back[i][1])
+    {
+      dT = -dT;
+    }
+    if (enc_antA == mov_forward[i - 1][0] && encA == mov_forward[i][0] && enc_antB == mov_forward[i - 1][1] && encB == mov_forward[i][1])
+    {
+      dT = dT;
+    }
+  }
+  float velW = 1666.666 / ((float)dT);
+  return velW;
 }
