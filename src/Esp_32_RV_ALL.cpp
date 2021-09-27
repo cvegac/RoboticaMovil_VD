@@ -65,34 +65,38 @@ int stop[2] = {0, 0};
 
 // Temps
 long lastLecture = 0;
-long lastAction = 0;
 long lastServo = 0;
 long lastLaser = 0;
+long lastMotorControl = 0;
+long lastCarControl = 0;
 int count = 0;
 
 // Communication
-String accion = "";
 String incoming = "";
 String toSend = "";
 bool in = false;
 
 // Setting PWM properties
-int PWM = 256;
+int PWM = 360;
 const int freq = 100;
 const int channelI = 8;
 const int channelD = 9;
 const int resolution = 10;
 
 // MPU-6050
-int16_t AcX, AcY, GyZ;
+int16_t AcX, AcY, GyY, GyZ;
 
 float Acc[2];
+float Wp_MPU;
 float Gy_Z;
+float Gy_Y;
 float Ac_X;
 float Ac_Y;
 float Angle_Z;
-float Vel_X;
+float Max_Angle_Y;
+float Max_Vel_X;
 float Vel_Y;
+float Vp_MPU;
 float Post_X;
 float Post_Y;
 
@@ -128,22 +132,52 @@ int enc_LB;
 int enc_RA;
 int enc_RB;
 
-float Wp_encR;
-float Wp_encL;
+float W_encR = 0;
+float W_encL = 0;
+float Wd_encR = 0;
+float Wd_encL = 0;
+float Wr_ant = 0;
+float Wl_ant = 0;
+float Vd = 2.4;
+float Wd = 0;
+float Vp_Enc = 0;
+float Wp_Enc = 0;
+const float R = 2.4;
+const float L = 12;
+float Err_Wr_ant = 0;
+float Err_Wl_ant = 0;
+float tR;
+float tL;
+size_t contL = 1;
+size_t contR = 1;
+size_t cont = 1;
+
+float Wr = 0;
+float Wl = 0;
+float x_MPU[3000];
+float y_MPU[3000];
+float theta_MPU[3000];
+float x_Enc[3000];
+float y_Enc[3000];
+float theta_Enc[3000];
 
 long prevTime;
+long prevTimeEnc;
+long prevTimeMPU;
 float dt;
 
 // Time between action (milliseconds)
 int laserPeriod = 200;
 int servoPeriod = 200;
-int movilControlPeriod = 150;
-int motorControlPeriod = 15;
-int actionPeriod = 50;
+int mpuPeriod = 10;
+int carControlPeriod = 30;
+int motorControlPeriod = 10;
 
 /* Function declaration */
 void codeForTask1(void *parameter);
 void move(int Dir_R[2], int Dir_L[2], int PWM_R, int PWM_L);
+void f_move_L(int Dir_L[2], int PWM_L);
+void f_move_R(int Dir_R[2], int PWM_R);
 void f_forward();
 void f_back();
 void f_right();
@@ -161,16 +195,12 @@ void setup()
   Wire.write(0);
   Wire.endTransmission(true);
 
+  Serial.begin(1500000);
   Serial.println("VL53L0X test");
   if (!lox.begin())
   {
     Serial.println(F("Error al iniciar VL53L0X"));
-    while (1)
-      ;
   }
-
-  Serial.begin(1500000);
-  clear();
 
   xTaskCreatePinnedToCore(
       codeForTask1, // Task function.
@@ -217,7 +247,8 @@ void setup()
 void loop()
 {
   long now = millis();
-  if (now - lastLaser > laserPeriod)
+
+  /* if (now - lastLaser > laserPeriod)
   {
     lastLaser = now;
     VL53L0X_RangingMeasurementData_t measure;
@@ -234,6 +265,7 @@ void loop()
       distance = 1280;
     }
   }
+  */
 
   if (now - lastServo > servoPeriod)
   {
@@ -256,8 +288,10 @@ void loop()
     }
     servo1.write(posDegrees);
   }
+
   now = millis();
-  if (now - lastLecture >= movilControlPeriod)
+
+  if (now - lastLecture >= mpuPeriod)
   {
     lastLecture = now;
 
@@ -271,107 +305,272 @@ void loop()
 
     // Read gyroscope data
     Wire.beginTransmission(MPU);
-    Wire.write(0x47);
+    Wire.write(0x45);
     Wire.endTransmission(false);
-    Wire.requestFrom(MPU, 2, true);
+    Wire.requestFrom(MPU, 4, true);
+    GyY = Wire.read() << 8 | Wire.read();
     GyZ = Wire.read() << 8 | Wire.read();
 
     Ac_X = AcX / A_R;
     Ac_Y = AcY / A_R;
     Gy_Z = GyZ / G_R;
+    Gy_Y = GyY / G_R;
 
     dt = (millis() - prevTime) / 1000.0;
     prevTime = millis();
 
     // Integrals to obtain moviment in X
-    Vel_X = Vel_X + Ac_X * dt;
-    Post_X = Post_X + Ac_X * dt;
+    float Vel_X = Ac_X * dt;
 
-    // Integrals to obtain moviment in Y
-    Vel_Y = Vel_Y + Ac_Y * dt;
-    Post_Y = Post_Y + Ac_Y * dt;
+    if (Vel_X > Max_Vel_X)
+    {
+      Max_Vel_X = Vel_X;
+    }
 
-    // Integral to obtain YAW
-    Angle_Z = Angle_Z + Gy_Z * dt - 0.012; // This 0.012 is for the Drift Error
+    if (Ac_Y * dt > Max_Vel_X)
+    {
+      // Integrals to obtain vel in Y
+      Vp_MPU += Ac_Y * dt; // X carro
+    }
+
+    float Angle_Y = Gy_Y * dt;
+
+    if (Angle_Y > Max_Angle_Y)
+    {
+      Max_Angle_Y = Angle_Y;
+    }
+
+    if (Gy_Z * dt > Max_Angle_Y)
+    {
+      Wp_MPU += Gy_Z * dt;
+    }
   }
 
-  if (now - lastAction > 5)
+  if (now - lastCarControl >= carControlPeriod)
   {
-    lastAction = now;
-    if (count < 4)
+    lastCarControl = now;
+
+    Wr = Wr / (carControlPeriod / motorControlPeriod);
+    Wl = Wl / (carControlPeriod / motorControlPeriod);
+
+    Vp_Enc = Wr * (1.2) + Wl * (1.04347);
+    Wp_Enc = Wr * (1.2) - Wl * (1.04347);
+
+    float Vel_X_Enc = cos(theta_Enc[cont - 1] * 0.0174532925) * Vp_Enc;
+    float Vel_Y_Enc = sin(theta_Enc[cont - 1] * 0.0174532925) * Vp_Enc;
+
+    dt = (millis() - prevTimeEnc) / 1000.0;
+    prevTimeEnc = millis();
+
+    x_Enc[cont] = x_Enc[cont - 1] + dt * Vel_X_Enc * 6.41025641;
+    y_Enc[cont] = y_Enc[cont - 1] + dt * Vel_Y_Enc * 6.41025641;
+    theta_Enc[cont] = theta_Enc[cont - 1] + dt * Wp_Enc;
+    /*
+    Serial.print("Wr: ");
+    Serial.print(Wr);
+    Serial.print("  Vp: ");
+    Serial.print(Vp_Enc);
+    Serial.print("  VelX: ");
+    Serial.print(Vel_X_Enc);
+    Serial.print("  VelY: ");
+    Serial.print(Vel_Y_Enc);
+    Serial.print("  Wp: ");
+    Serial.print(Wp_Enc);
+    Serial.print("  x: ");
+    Serial.print(x_Enc[cont]);
+    Serial.print("  y: ");
+    Serial.print(y_Enc[cont]);
+    Serial.print("  tetaAct: ");
+    Serial.println(theta_Enc[cont]);*/
+    cont++;
+    Wr = 0;
+    Wl = 0;
+  }
+
+  if (now - lastMotorControl >= motorControlPeriod)
+  {
+    lastMotorControl = now;
+    // Control rueda derecha
+    Wd_encR = Vd / R + (Wd * L) / (2 * R);
+    float Err_Wr = Wd_encR - W_encR;
+    float salR = 2.1806 * Err_Wr - 1.9209 * Err_Wr_ant + Wr_ant;
+    if (salR > 7)
     {
-      f_stop();
+      salR = 7;
+    }
+    else if (salR < -7)
+    {
+      salR = -7;
+    }
+    if (Wd_encR > 0)
+    {
+      PWM = salR * 70 + 10;
+      if (PWM < 0)
+      {
+        PWM = 0;
+      }
+      //f_move_L(forward, PWM);
     }
     else
     {
-      if (accion == "B")
+      PWM = salR * -70 + 10;
+      if (PWM < 0)
       {
-        f_back();
+        PWM = 0;
       }
-      if (accion == "R")
-      {
-        f_right();
-      }
-      if (accion == "L")
-      {
-        f_left();
-      }
-      if (accion == "F")
-      {
-        digitalWrite(led, HIGH);
-        f_forward();
-      }
-      if (accion == "S")
-      {
-        digitalWrite(led, LOW);
-        f_stop();
-      }
-      if (accion == "a")
-      {
-        toSend = String(Angle_Z);
-      }
-      if (accion == "d")
-      {
-        toSend = String(distance);
-      }
-      if (accion == "p")
-      {
-        toSend = String(posDegrees);
-      }
-      if (accion == "+")
-      {
-        PWM = PWM + 10;
-        f_forward();
-        toSend = String(PWM);
-      }
-      if (accion == "-")
-      {
-        PWM = PWM - 10;
-        f_forward();
-        toSend = String(PWM);
-      }
-      if (accion == "r")
-      {
-        PWM = 10;
-        toSend = String(PWM);
-      }
-      accion = "";
+      //f_move_L(back, PWM);
     }
-    count++;
+
+    //Serial.println(W_encR);
+    //Serial.println(now);
+    Wr_ant = salR;
+    Err_Wr_ant = Err_Wr;
+
+    // Control rueda izquierda
+    Wd_encL = Vd / R - (Wd * L) / (2 * R);
+    float Err_Wl = Wd_encL * 1.15 - W_encL;
+    float salL = 2.2043 * Err_Wl - 1.9347 * Err_Wl_ant + Wl_ant;
+    if (salL > 7)
+    {
+      salL = 7;
+    }
+    else if (salL < -7)
+    {
+      salL = -7;
+    }
+
+    if (Wd_encL > 0)
+    {
+      PWM = salL * 70 + 10;
+      if (PWM < 0)
+      {
+        PWM = 0;
+      }
+      //f_move_R(forward, PWM);
+    }
+    else
+    {
+      PWM = salL * -70 + 10;
+      if (PWM < 0)
+      {
+        PWM = 0;
+      }
+      //f_move_R(back, PWM);
+    }
+    //Serial.print(Wd_encL);
+    //Serial.print("  ");
+    //Serial.println(PWM);
+    Wl_ant = salL;
+    Err_Wl_ant = Err_Wl;
+    Wr += W_encR;
+    Wl += W_encL;
+
+    Wp_MPU = Wp_MPU / (carControlPeriod / motorControlPeriod);
+    Vp_MPU = Vp_MPU / (carControlPeriod / motorControlPeriod);
+
+    float Vel_X_MPU = cos(theta_MPU[cont - 1] * 0.0174532925) * Vp_MPU;
+    float Vel_Y_MPU = sin(theta_MPU[cont - 1] * 0.0174532925) * Vp_MPU;
+
+    dt = (millis() - prevTimeMPU) / 1000.0;
+    prevTimeMPU = millis();
+
+    x_MPU[cont] = x_MPU[cont - 1] + dt * Vel_X_MPU * 6.41025641;
+    y_MPU[cont] = y_MPU[cont - 1] + dt * Vel_Y_MPU * 6.41025641;
+    theta_MPU[cont] = theta_MPU[cont - 1] + dt * Wp_MPU;
+
+    Serial.print("Wr: ");
+    Serial.print(Wr);
+    Serial.print("  Vp: ");
+    Serial.print(Vp_MPU);
+    Serial.print("  VelX: ");
+    Serial.print(Vel_X_MPU);
+    Serial.print("  VelY: ");
+    Serial.print(Vel_Y_MPU);
+    Serial.print("  Wp: ");
+    Serial.print(Wp_MPU);
+    Serial.print("  x: ");
+    Serial.print(x_MPU[cont]);
+    Serial.print("  y: ");
+    Serial.print(y_MPU[cont]);
+    Serial.print("  tetaAct: ");
+    Serial.println(theta_MPU[cont]);
+    Vp_MPU = 0;
+    Wp_MPU = 0;
   }
 
   if (in)
   {
-    if (incoming == "W")
+    if (incoming == "B")
     {
+      f_back();
     }
-    if (incoming == "w")
+    if (incoming == "R")
     {
+      f_right();
     }
-    accion = incoming;
+    if (incoming == "L")
+    {
+      f_left();
+    }
+    if (incoming == "F")
+    {
+      digitalWrite(led, HIGH);
+      f_forward();
+    }
+    if (incoming == "S")
+    {
+      digitalWrite(led, LOW);
+      f_stop();
+    }
+    if (incoming == "a")
+    {
+      toSend = String(Angle_Z);
+    }
+    if (incoming == "d")
+    {
+      toSend = String(distance);
+    }
+    if (incoming == "p")
+    {
+      toSend = String(posDegrees);
+    }
+    if (incoming == "+")
+    {
+      PWM = PWM + 10;
+      f_forward();
+      toSend = String(PWM);
+    }
+    if (incoming == "-")
+    {
+      PWM = PWM - 10;
+      f_forward();
+      toSend = String(PWM);
+    }
+    if (incoming == "r")
+    {
+      PWM = 10;
+      toSend = String(PWM);
+    }
+    if (incoming == "Wr")
+    {
+      toSend = String(W_encR);
+      delay(50);
+      toSend = String(tR);
+      delay(50);
+    }
+    if (incoming == "Wl")
+    {
+      f_stop();
+      toSend = String(W_encL);
+      delay(50);
+      toSend = String(tL);
+      delay(50);
+    }
+
     incoming = "";
     in = false;
   }
+
   encoder();
 }
 
@@ -422,6 +621,20 @@ void move(int Dir_R[2], int Dir_L[2], int PWM_R, int PWM_L)
   ledcWrite(channelI, PWM_L); // Analog output - left
 }
 
+void f_move_R(int Dir_R[2], int PWM_R)
+{
+  digitalWrite(rigth_Dir_1, Dir_R[0]);
+  digitalWrite(rigth_Dir_2, Dir_R[1]);
+  ledcWrite(channelD, PWM_R); // Analog output - rigth
+}
+
+void f_move_L(int Dir_L[2], int PWM_L)
+{
+  digitalWrite(left_Dir_1, Dir_L[0]);
+  digitalWrite(left_Dir_2, Dir_L[1]);
+  ledcWrite(channelI, PWM_L); // Analog output - left
+}
+
 void f_forward()
 {
   move(forward, forward, PWM, PWM);
@@ -464,37 +677,42 @@ void encoder()
 
   if (enc_antLA != enc_LA || enc_antLB != enc_LB)
   {
-    Wp_encL = processEnc(enc_antLA, enc_LA, enc_antLB, enc_LB, now_microSegL);
-    Serial.print("L: ");
-    Serial.println(Wp_encL);
+    W_encL = processEnc(enc_antLA, enc_LA, enc_antLB, enc_LB, now_microSegL);
+    contL++;
+
     now_microSegL = micros();
+    tL = now_microSegL;
     enc_antLA = enc_LA;
     enc_antLB = enc_LB;
   }
-  else if (Wp_encL != 0)
+  else if (W_encL != 0)
   {
     if (micros() - now_microSegL > 100000)
     {
-      Wp_encL = 0;
-      Serial.println("R: 0");
+      W_encL = 0;
+      tL = now_microSegL;
+      now_microSegL = micros();
+      contL++;
     }
   }
 
   if (enc_antRA != enc_RA || enc_antRB != enc_RB)
   {
-    Wp_encR = processEnc(enc_antRA, enc_RA, enc_antRB, enc_RB, now_microSegR);
-    Serial.print("R: ");
-    Serial.println(Wp_encR);
+    W_encR = processEnc(enc_antRA, enc_RA, enc_antRB, enc_RB, now_microSegR);
+    contR++;
     now_microSegR = micros();
+    tR = now_microSegR;
     enc_antRA = enc_RA;
     enc_antRB = enc_RB;
   }
-  else if (Wp_encR != 0)
+  else if (W_encR != 0)
   {
     if (micros() - now_microSegR > 100000)
     {
-      Wp_encR = 0;
-      Serial.println("R: 0");
+      W_encR = 0;
+      now_microSegR = micros();
+      tR = now_microSegR;
+      contR++;
     }
   }
 }
